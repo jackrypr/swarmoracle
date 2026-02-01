@@ -23,8 +23,8 @@ function App() {
 
     const checkBackendConnection = async () => {
         try {
-            // Use environment variable for API URL, fallback to localhost for development
-            const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+            // Production backend URL
+            const apiUrl = 'https://swarmoracle-production.up.railway.app';
             const endpoints = [
                 apiUrl,
                 'http://localhost:3000',

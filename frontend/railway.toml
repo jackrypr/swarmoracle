@@ -9,7 +9,6 @@ restartPolicyMaxRetries = 5
 
 [env]
 NODE_ENV = "production"
-VITE_API_URL = "${BACKEND_URL}"
 
 [deploy.healthcheck]
 timeout = 100
