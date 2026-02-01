@@ -241,7 +241,243 @@ class SwarmOracleWebSocketService {
         // Deduplicate updates for same entity
         const optimized = this.deduplicateUpdates(updates);
         
-        const payload = {\n            type: `batch:${updateType}`,\n            updates: optimized,\n            count: optimized.length,\n            timestamp: Date.now()\n        };\n        \n        // Compress large payloads\n        const serialized = JSON.stringify(payload);\n        if (serialized.length > this.compressionThreshold) {\n            // Could implement compression here\n            console.log(`Large payload (${serialized.length} bytes) for room ${roomId}`);\n        }\n        \n        this.io.to(roomId).emit('batch_update', payload);\n        this.metrics.messagesPerSecond++;\n    }\n    \n    /**\n     * Remove duplicate updates for same entity\n     */\n    deduplicateUpdates(updates) {\n        const latest = new Map();\n        \n        updates.forEach(update => {\n            const key = update.id || update.answerId || update.agentId || 'global';\n            if (!latest.has(key) || latest.get(key).timestamp < update.timestamp) {\n                latest.set(key, update);\n            }\n        });\n        \n        return Array.from(latest.values());\n    }\n    \n    /**\n     * Broadcast new answer submission\n     */\n    broadcastAnswerSubmitted(questionId, answerData) {\n        this.scheduleUpdate(`question:${questionId}`, 'answer', {\n            type: 'answer:submitted',\n            ...answerData\n        });\n        \n        // Also notify global subscribers\n        this.scheduleUpdate('global', 'activity', {\n            type: 'answer:submitted',\n            questionId,\n            agentName: answerData.agentName,\n            timestamp: answerData.timestamp\n        });\n    }\n    \n    /**\n     * Broadcast consensus reached\n     */\n    broadcastConsensusReached(questionId, consensusData) {\n        const payload = {\n            type: 'consensus:reached',\n            questionId,\n            winningAnswer: consensusData.winningAnswer,\n            consensusStrength: consensusData.consensusStrength,\n            confidenceLevel: consensusData.confidenceLevel,\n            participantCount: consensusData.participantCount,\n            algorithm: consensusData.algorithm,\n            timestamp: new Date()\n        };\n        \n        // Immediate broadcast (don't batch consensus results)\n        this.io.to(`question:${questionId}`).emit('consensus:reached', payload);\n        this.io.to('global').emit('consensus:reached', payload);\n        \n        console.log(`Consensus reached for question ${questionId}`);\n    }\n    \n    /**\n     * Broadcast new question to relevant agents\n     */\n    broadcastNewQuestion(questionData) {\n        // Send to agents based on their capabilities\n        this.agentConnections.forEach((connection, agentId) => {\n            // Could filter by agent capabilities here\n            this.io.to(`agent:${agentId}`).emit('question:new', {\n                type: 'question:new',\n                question: questionData,\n                timestamp: new Date()\n            });\n        });\n        \n        // Also broadcast globally\n        this.scheduleUpdate('global', 'question', {\n            type: 'question:new',\n            question: questionData\n        });\n    }\n    \n    /**\n     * Broadcast leaderboard updates\n     */\n    broadcastLeaderboardUpdate(leaderboardData) {\n        this.scheduleUpdate('leaderboard', 'leaderboard', {\n            type: 'leaderboard:updated',\n            leaderboard: leaderboardData\n        });\n    }\n    \n    /**\n     * Broadcast agent reputation updates\n     */\n    broadcastReputationUpdate(agentId, reputationData) {\n        // Notify the specific agent\n        this.io.to(`agent:${agentId}`).emit('reputation:updated', {\n            type: 'reputation:updated',\n            newReputation: reputationData.newReputation,\n            change: reputationData.change,\n            reason: reputationData.reason,\n            timestamp: new Date()\n        });\n        \n        // Update leaderboard if this affects rankings\n        this.scheduleUpdate('leaderboard', 'reputation', {\n            agentId,\n            newReputation: reputationData.newReputation,\n            change: reputationData.change\n        });\n    }\n    \n    /**\n     * Authenticate agent using JWT token\n     */\n    async authenticateAgent(apiKey, agentId) {\n        try {\n            const decoded = jwt.verify(apiKey, process.env.JWT_SECRET);\n            \n            if (decoded.sub !== agentId) {\n                throw new Error('Agent ID mismatch');\n            }\n            \n            return {\n                id: decoded.sub,\n                name: decoded.name,\n                reputationScore: decoded.reputation,\n                capabilities: decoded.capabilities\n            };\n            \n        } catch (error) {\n            console.error('JWT verification failed:', error);\n            return null;\n        }\n    }\n    \n    /**\n     * Handle answer submission from WebSocket\n     */\n    async handleAnswerSubmission(agentId, answerData) {\n        // This would integrate with your answer service\n        // For now, just return a mock response\n        return {\n            id: `answer_${Date.now()}`,\n            agentId,\n            questionId: answerData.questionId,\n            content: answerData.content,\n            confidence: answerData.confidence,\n            timestamp: new Date()\n        };\n    }\n    \n    /**\n     * Get real-time connection statistics\n     */\n    getConnectionStats() {\n        return {\n            totalConnections: this.metrics.totalConnections,\n            activeConnections: this.metrics.activeConnections,\n            agentConnections: this.agentConnections.size,\n            questionSubscriptions: this.questionSubscriptions.size,\n            messagesPerSecond: this.metrics.messagesPerSecond,\n            avgLatency: this.metrics.avgLatency\n        };\n    }\n    \n    /**\n     * Start collecting metrics\n     */\n    startMetricsCollection() {\n        setInterval(() => {\n            // Reset per-second counters\n            this.metrics.messagesPerSecond = 0;\n            \n            // Update total connections\n            this.metrics.totalConnections = this.io.engine.clientsCount;\n            \n            // Log metrics periodically\n            if (this.metrics.activeConnections > 0) {\n                console.log(`WebSocket Metrics: ${this.metrics.activeConnections} active, ${this.agentConnections.size} agents`);\n            }\n        }, 1000);\n        \n        // Health check for stale connections\n        setInterval(() => {\n            const now = new Date();\n            const staleThreshold = 5 * 60 * 1000; // 5 minutes\n            \n            for (const [agentId, connection] of this.agentConnections.entries()) {\n                if (now - connection.lastActivity > staleThreshold) {\n                    console.log(`Removing stale connection for agent ${agentId}`);\n                    this.agentConnections.delete(agentId);\n                }\n            }\n        }, 60000); // Check every minute\n    }\n    \n    /**\n     * Graceful shutdown\n     */\n    async shutdown() {\n        console.log('Shutting down WebSocket service...');\n        \n        // Notify all connected agents\n        this.io.emit('server:shutdown', {\n            message: 'Server is shutting down',\n            timestamp: new Date()\n        });\n        \n        // Wait a bit for messages to be sent\n        await new Promise(resolve => setTimeout(resolve, 1000));\n        \n        // Close all connections\n        this.io.close();\n        \n        // Close Redis connection\n        this.redis.disconnect();\n        \n        console.log('WebSocket service shutdown complete');\n    }\n}\n\nmodule.exports = SwarmOracleWebSocketService;"
+        const payload = {
+            type: `batch:${updateType}`,
+            updates: optimized,
+            count: optimized.length,
+            timestamp: Date.now()
+        };
+        
+        // Compress large payloads
+        const serialized = JSON.stringify(payload);
+        if (serialized.length > this.compressionThreshold) {
+            // Could implement compression here
+            console.log(`Large payload (${serialized.length} bytes) for room ${roomId}`);
+        }
+        
+        this.io.to(roomId).emit('batch_update', payload);
+        this.metrics.messagesPerSecond++;
+    }
+    
+    /**
+     * Remove duplicate updates for same entity
+     */
+    deduplicateUpdates(updates) {
+        const latest = new Map();
+        
+        updates.forEach(update => {
+            const key = update.id || update.answerId || update.agentId || 'global';
+            if (!latest.has(key) || latest.get(key).timestamp < update.timestamp) {
+                latest.set(key, update);
+            }
+        });
+        
+        return Array.from(latest.values());
+    }
+    
+    /**
+     * Broadcast new answer submission
+     */
+    broadcastAnswerSubmitted(questionId, answerData) {
+        this.scheduleUpdate(`question:${questionId}`, 'answer', {
+            type: 'answer:submitted',
+            ...answerData
+        });
+        
+        // Also notify global subscribers
+        this.scheduleUpdate('global', 'activity', {
+            type: 'answer:submitted',
+            questionId,
+            agentName: answerData.agentName,
+            timestamp: answerData.timestamp
+        });
+    }
+    
+    /**
+     * Broadcast consensus reached
+     */
+    broadcastConsensusReached(questionId, consensusData) {
+        const payload = {
+            type: 'consensus:reached',
+            questionId,
+            winningAnswer: consensusData.winningAnswer,
+            consensusStrength: consensusData.consensusStrength,
+            confidenceLevel: consensusData.confidenceLevel,
+            participantCount: consensusData.participantCount,
+            algorithm: consensusData.algorithm,
+            timestamp: new Date()
+        };
+        
+        // Immediate broadcast (don't batch consensus results)
+        this.io.to(`question:${questionId}`).emit('consensus:reached', payload);
+        this.io.to('global').emit('consensus:reached', payload);
+        
+        console.log(`Consensus reached for question ${questionId}`);
+    }
+    
+    /**
+     * Broadcast new question to relevant agents
+     */
+    broadcastNewQuestion(questionData) {
+        // Send to agents based on their capabilities
+        this.agentConnections.forEach((connection, agentId) => {
+            // Could filter by agent capabilities here
+            this.io.to(`agent:${agentId}`).emit('question:new', {
+                type: 'question:new',
+                question: questionData,
+                timestamp: new Date()
+            });
+        });
+        
+        // Also broadcast globally
+        this.scheduleUpdate('global', 'question', {
+            type: 'question:new',
+            question: questionData
+        });
+    }
+    
+    /**
+     * Broadcast leaderboard updates
+     */
+    broadcastLeaderboardUpdate(leaderboardData) {
+        this.scheduleUpdate('leaderboard', 'leaderboard', {
+            type: 'leaderboard:updated',
+            leaderboard: leaderboardData
+        });
+    }
+    
+    /**
+     * Broadcast agent reputation updates
+     */
+    broadcastReputationUpdate(agentId, reputationData) {
+        // Notify the specific agent
+        this.io.to(`agent:${agentId}`).emit('reputation:updated', {
+            type: 'reputation:updated',
+            newReputation: reputationData.newReputation,
+            change: reputationData.change,
+            reason: reputationData.reason,
+            timestamp: new Date()
+        });
+        
+        // Update leaderboard if this affects rankings
+        this.scheduleUpdate('leaderboard', 'reputation', {
+            agentId,
+            newReputation: reputationData.newReputation,
+            change: reputationData.change
+        });
+    }
+    
+    /**
+     * Authenticate agent using JWT token
+     */
+    async authenticateAgent(apiKey, agentId) {
+        try {
+            const decoded = jwt.verify(apiKey, process.env.JWT_SECRET);
+            
+            if (decoded.sub !== agentId) {
+                throw new Error('Agent ID mismatch');
+            }
+            
+            return {
+                id: decoded.sub,
+                name: decoded.name,
+                reputationScore: decoded.reputation,
+                capabilities: decoded.capabilities
+            };
+            
+        } catch (error) {
+            console.error('JWT verification failed:', error);
+            return null;
+        }
+    }
+    
+    /**
+     * Handle answer submission from WebSocket
+     */
+    async handleAnswerSubmission(agentId, answerData) {
+        // This would integrate with your answer service
+        // For now, just return a mock response
+        return {
+            id: `answer_${Date.now()}`,
+            agentId,
+            questionId: answerData.questionId,
+            content: answerData.content,
+            confidence: answerData.confidence,
+            timestamp: new Date()
+        };
+    }
+    
+    /**
+     * Get real-time connection statistics
+     */
+    getConnectionStats() {
+        return {
+            totalConnections: this.metrics.totalConnections,
+            activeConnections: this.metrics.activeConnections,
+            agentConnections: this.agentConnections.size,
+            questionSubscriptions: this.questionSubscriptions.size,
+            messagesPerSecond: this.metrics.messagesPerSecond,
+            avgLatency: this.metrics.avgLatency
+        };
+    }
+    
+    /**
+     * Start collecting metrics
+     */
+    startMetricsCollection() {
+        setInterval(() => {
+            // Reset per-second counters
+            this.metrics.messagesPerSecond = 0;
+            
+            // Update total connections
+            this.metrics.totalConnections = this.io.engine.clientsCount;
+            
+            // Log metrics periodically
+            if (this.metrics.activeConnections > 0) {
+                console.log(`WebSocket Metrics: ${this.metrics.activeConnections} active, ${this.agentConnections.size} agents`);
+            }
+        }, 1000);
+        
+        // Health check for stale connections
+        setInterval(() => {
+            const now = new Date();
+            const staleThreshold = 5 * 60 * 1000; // 5 minutes
+            
+            for (const [agentId, connection] of this.agentConnections.entries()) {
+                if (now - connection.lastActivity > staleThreshold) {
+                    console.log(`Removing stale connection for agent ${agentId}`);
+                    this.agentConnections.delete(agentId);
+                }
+            }
+        }, 60000); // Check every minute
+    }
+    
+    /**
+     * Graceful shutdown
+     */
+    async shutdown() {
+        console.log('Shutting down WebSocket service...');
+        
+        // Notify all connected agents
+        this.io.emit('server:shutdown', {
+            message: 'Server is shutting down',
+            timestamp: new Date()
+        });
+        
+        // Wait a bit for messages to be sent
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Close all connections
+        this.io.close();
+        
+        // Close Redis connection
+        this.redis.disconnect();
+        
+        console.log('WebSocket service shutdown complete');
+    }
+}
+
+module.exports = SwarmOracleWebSocketService;"
         }
       ],
       "api": "anthropic-messages",
