@@ -88,7 +88,7 @@ model Question {
   // High-frequency query optimization
   @@index([status, createdAt(sort: Desc)], name: "idx_questions_status_created")
   @@index([category, status], name: "idx_questions_category_status")
-  @@index([consensusReachedAt(sort: Desc)], name: "idx_questions_consensus_reached", where: { consensusReachedAt: { not: null } })
+  @@index([consensusReachedAt(sort: Desc)], name: "idx_questions_consensus_reached")
   @@map("questions")
 }
 
