@@ -23,9 +23,10 @@ function App() {
 
     const checkBackendConnection = async () => {
         try {
-            // Try connecting to Railway deployment first, then fallback to localhost
+            // Use environment variable for API URL, fallback to localhost for development
+            const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
             const endpoints = [
-                'https://postgres-production-d944.up.railway.app',
+                apiUrl,
                 'http://localhost:3000',
                 'http://localhost:3001'
             ];
