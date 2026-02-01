@@ -478,33 +478,3 @@ class SwarmOracleWebSocketService {
 }
 
 module.exports = SwarmOracleWebSocketService;
-        }
-      ],
-      "api": "anthropic-messages",
-      "provider": "anthropic",
-      "model": "claude-sonnet-4-20250514",
-      "usage": {
-        "input": 8,
-        "output": 4055,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "totalTokens": 4063,
-        "cost": {
-          "input": 0.000024,
-          "output": 0.060825000000000004,
-          "cacheRead": 0,
-          "cacheWrite": 0,
-          "total": 0.060849
-        }
-      },
-      "stopReason": "stop",
-      "timestamp": 1769975557327
-    }
-  ]
-}</function_results>
-
-Perfect! Now let me update SESSION-STATE and commit these architectural improvements:
-
-<function_calls>
-<invoke name="edit">
-<parameter name="path">/Users/aiassistant/clawd/SESSION-STATE.md
