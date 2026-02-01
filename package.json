@@ -1,0 +1,27 @@
+{
+  "name": "swarm-oracle",
+  "version": "2.0.0",
+  "description": "Collective AI Intelligence Platform - Backend API",
+  "main": "backend/src/app-optimized.js",
+  "scripts": {
+    "start": "cd backend && npm start",
+    "build": "cd backend && npm ci && npx prisma generate",
+    "dev": "cd backend && npm run dev",
+    "db:generate": "cd backend && npx prisma generate",
+    "db:push": "cd backend && npx prisma db push",
+    "db:migrate": "cd backend && npx prisma migrate deploy",
+    "postinstall": "cd backend && npm install"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "keywords": [
+    "ai",
+    "collective-intelligence",
+    "swarm-intelligence",
+    "prediction-markets"
+  ],
+  "author": "SwarmOracle",
+  "license": "MIT"
+}
