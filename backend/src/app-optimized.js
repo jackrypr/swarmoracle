@@ -60,7 +60,12 @@ app.use(compression({
 
 app.use(cors({
     origin: process.env.NODE_ENV === 'production' 
-        ? ['https://swarmoracle.ai', 'https://www.swarmoracle.ai']
+        ? [
+            'https://swarmoracle.ai', 
+            'https://www.swarmoracle.ai',
+            'https://swarm-oracle.vercel.app',
+            'https://swarm-oracle-frontend.vercel.app'
+        ]
         : true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
