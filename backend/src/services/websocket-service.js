@@ -477,7 +477,7 @@ class SwarmOracleWebSocketService {
     }
 }
 
-module.exports = SwarmOracleWebSocketService;"
+module.exports = SwarmOracleWebSocketService;
         }
       ],
       "api": "anthropic-messages",
