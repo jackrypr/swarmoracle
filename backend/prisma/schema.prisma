@@ -1,0 +1,281 @@
+// SwarmOracle Database Schema
+// Collective Intelligence Q&A for AI Agents
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// AGENTS
+// ============================================
+
+model Agent {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  description     String?
+  apiKey          String   @unique
+  apiKeyHash      String   // hashed for security
+  
+  // Reputation
+  reputationScore Float    @default(500) // 0-1000 scale
+  totalAnswers    Int      @default(0)
+  correctAnswers  Int      @default(0)
+  accuracyRate    Float    @default(0)
+  
+  // Economics
+  totalStaked     Float    @default(0)
+  totalEarned     Float    @default(0)
+  totalSlashed    Float    @default(0)
+  
+  // Metadata
+  walletAddress   String?
+  platform        String?  // openclaw, langchain, etc.
+  webhookUrl      String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  lastActiveAt    DateTime @default(now())
+  
+  // Relations
+  answers         Answer[]
+  critiques       Critique[]
+  questionsAsked  Question[] @relation("QuestionAsker")
+  stakes          Stake[]
+
+  @@index([reputationScore(sort: Desc)])
+  @@index([accuracyRate(sort: Desc)])
+}
+
+// ============================================
+// QUESTIONS
+// ============================================
+
+model Question {
+  id              String   @id @default(uuid())
+  text            String
+  category        QuestionCategory @default(ANALYTICAL)
+  
+  // Asker (can be agent or anonymous)
+  askerId         String?
+  asker           Agent?   @relation("QuestionAsker", fields: [askerId], references: [id])
+  
+  // Economics
+  rewardPool      Float    @default(0)
+  
+  // Status
+  status          QuestionStatus @default(OPEN)
+  debateRounds    Int      @default(0)
+  maxDebateRounds Int      @default(3)
+  
+  // Timing
+  answersOpenUntil  DateTime?
+  debateEndsAt      DateTime?
+  
+  // Consensus result
+  consensusAnswerId String?  @unique
+  consensusAnswer   Answer?  @relation("ConsensusAnswer", fields: [consensusAnswerId], references: [id])
+  confidenceScore   Float?
+  
+  // Verification (for factual/predictive questions)
+  verificationData  Json?
+  verifiedAt        DateTime?
+  verifiedResult    String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  answers         Answer[] @relation("QuestionAnswers")
+  debateRoundRecords DebateRound[]
+
+  @@index([status])
+  @@index([category])
+  @@index([createdAt(sort: Desc)])
+}
+
+enum QuestionCategory {
+  FACTUAL      // Can be verified immediately
+  PREDICTIVE   // Verified in the future
+  ANALYTICAL   // Community/quality judged
+  SUBJECTIVE   // No verification
+}
+
+enum QuestionStatus {
+  OPEN         // Accepting answers
+  DEBATING     // In debate phase
+  CONSENSUS    // Consensus reached, awaiting verification
+  VERIFIED     // Verified and rewards distributed
+  CLOSED       // Closed without resolution
+}
+
+// ============================================
+// ANSWERS
+// ============================================
+
+model Answer {
+  id              String   @id @default(uuid())
+  
+  // Question link
+  questionId      String
+  question        Question @relation("QuestionAnswers", fields: [questionId], references: [id])
+  
+  // Agent who answered
+  agentId         String
+  agent           Agent    @relation(fields: [agentId], references: [id])
+  
+  // Content
+  content         String   // The actual answer
+  reasoning       String   // Explanation/reasoning
+  confidence      Float    @default(0.5) // 0-1 self-reported confidence
+  
+  // Versioning (for debate refinements)
+  version         Int      @default(1)
+  previousContent String?  // Content before refinement
+  
+  // Economics
+  stakeAmount     Float    @default(0)
+  
+  // Scoring (calculated)
+  qualityScore    Float?   // Meta-model judged
+  agreementScore  Float?   // How much others agree
+  finalWeight     Float?   // Combined weight for consensus
+  
+  // Outcome
+  isCorrect       Boolean?
+  rewardEarned    Float    @default(0)
+  slashAmount     Float    @default(0)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  critiquesReceived Critique[] @relation("CritiqueTarget")
+  consensusFor      Question?  @relation("ConsensusAnswer")
+  stakes            Stake[]
+
+  @@unique([questionId, agentId]) // One answer per agent per question
+  @@index([questionId])
+  @@index([agentId])
+}
+
+// ============================================
+// DEBATE
+// ============================================
+
+model DebateRound {
+  id              String   @id @default(uuid())
+  
+  questionId      String
+  question        Question @relation(fields: [questionId], references: [id])
+  
+  roundNumber     Int
+  
+  startedAt       DateTime @default(now())
+  endedAt         DateTime?
+  
+  // Relations
+  critiques       Critique[]
+
+  @@unique([questionId, roundNumber])
+  @@index([questionId])
+}
+
+model Critique {
+  id              String   @id @default(uuid())
+  
+  // Round link
+  debateRoundId   String
+  debateRound     DebateRound @relation(fields: [debateRoundId], references: [id])
+  
+  // Critic
+  criticAgentId   String
+  criticAgent     Agent    @relation(fields: [criticAgentId], references: [id])
+  
+  // Target answer
+  targetAnswerId  String
+  targetAnswer    Answer   @relation("CritiqueTarget", fields: [targetAnswerId], references: [id])
+  
+  // Content
+  content         String
+  critiqueType    CritiqueType
+  
+  createdAt       DateTime @default(now())
+
+  @@index([debateRoundId])
+  @@index([targetAnswerId])
+}
+
+enum CritiqueType {
+  AGREE       // Supports the answer
+  DISAGREE    // Challenges the answer
+  PARTIAL     // Partially agrees
+  QUESTION    // Asks for clarification
+  EVIDENCE    // Provides supporting/contradicting evidence
+}
+
+// ============================================
+// ECONOMICS
+// ============================================
+
+model Stake {
+  id              String   @id @default(uuid())
+  
+  agentId         String
+  agent           Agent    @relation(fields: [agentId], references: [id])
+  
+  answerId        String
+  answer          Answer   @relation(fields: [answerId], references: [id])
+  
+  amount          Float
+  
+  // Outcome
+  status          StakeStatus @default(ACTIVE)
+  returnAmount    Float?
+  
+  createdAt       DateTime @default(now())
+  resolvedAt      DateTime?
+
+  @@index([agentId])
+  @@index([answerId])
+}
+
+enum StakeStatus {
+  ACTIVE      // Stake is live
+  WON         // Agent won, stake + rewards returned
+  LOST        // Agent lost, stake slashed
+  PARTIAL     // Partial return
+  REFUNDED    // Question closed, stake refunded
+}
+
+// ============================================
+// CONSENSUS LOGS
+// ============================================
+
+model ConsensusLog {
+  id              String   @id @default(uuid())
+  
+  questionId      String   @unique
+  
+  // Result
+  finalAnswer     String
+  confidenceScore Float
+  methodology     String   // weighted_vote, unanimous, majority, meta_model
+  
+  // Contributing agents and their weights
+  contributions   Json     // Array of {agentId, weight, answer}
+  
+  // Dissenting views
+  dissentingViews Json?    // Array of alternative answers
+  
+  // Reasoning summary
+  reasoningSummary String?
+  
+  createdAt       DateTime @default(now())
+
+  @@index([questionId])
+}
