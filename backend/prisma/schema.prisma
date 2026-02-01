@@ -1,5 +1,5 @@
-// SwarmOracle Database Schema
-// Collective Intelligence Q&A for AI Agents
+// Optimized Prisma Schema for SwarmOracle
+// Based on Technical Architecture Analysis
 
 generator client {
   provider = "prisma-client-js"
@@ -10,272 +10,247 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ============================================
-// AGENTS
-// ============================================
-
 model Agent {
-  id              String   @id @default(uuid())
-  name            String   @unique
-  description     String?
-  apiKey          String   @unique
-  apiKeyHash      String   // hashed for security
+  id                  String   @id @default(uuid())
+  name                String   @db.VarChar(100)
+  description         String?  @db.VarChar(500)
+  platform            String   @db.VarChar(50)
+  webhookUrl          String?
+  capabilities        String[] // ['factual', 'predictive', 'analytical', 'creative']
   
-  // Reputation
-  reputationScore Float    @default(500) // 0-1000 scale
-  totalAnswers    Int      @default(0)
-  correctAnswers  Int      @default(0)
-  accuracyRate    Float    @default(0)
+  // Performance optimized fields
+  reputationScore     Decimal  @default(100) @db.Decimal(8, 4)
+  totalAnswers        Int      @default(0)
+  correctAnswers      Int      @default(0)
+  accuracyRate        Decimal  @default(0) @db.Decimal(5, 4)
+  totalEarned         Decimal  @default(0) @db.Decimal(12, 2)
   
-  // Economics
-  totalStaked     Float    @default(0)
-  totalEarned     Float    @default(0)
-  totalSlashed    Float    @default(0)
-  
-  // Metadata
-  walletAddress   String?
-  platform        String?  // openclaw, langchain, etc.
-  webhookUrl      String?
-  
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  lastActiveAt    DateTime @default(now())
+  // Activity tracking
+  lastActiveAt        DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
   
   // Relations
-  answers         Answer[]
-  critiques       Critique[]
-  questionsAsked  Question[] @relation("QuestionAsker")
-  stakes          Stake[]
-
-  @@index([reputationScore(sort: Desc)])
-  @@index([accuracyRate(sort: Desc)])
+  answers             Answer[]
+  stakes              Stake[]
+  critiques           Critique[]
+  statistics          AgentStats?
+  
+  // Composite indexes for performance
+  @@index([reputationScore(sort: Desc), lastActiveAt(sort: Desc)], name: "idx_agents_reputation_active")
+  @@index([accuracyRate(sort: Desc), totalAnswers(sort: Desc)], name: "idx_agent_performance")
+  @@index([platform, createdAt(sort: Desc)], name: "idx_agents_platform_created")
+  @@map("agents")
 }
 
-// ============================================
-// QUESTIONS
-// ============================================
+// Pre-computed agent statistics for fast queries
+model AgentStats {
+  agentId             String   @id
+  agent               Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  // Performance metrics
+  last24hAnswers      Int      @default(0)
+  last7dAccuracy      Decimal  @default(0) @db.Decimal(5, 4)
+  avgConsensusWeight  Decimal  @default(0) @db.Decimal(8, 6)
+  specialtyCategories Json     @default("[]")
+  
+  // Cache timestamps
+  calculatedAt        DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  @@map("agent_stats")
+}
 
 model Question {
-  id              String   @id @default(uuid())
-  text            String
-  category        QuestionCategory @default(ANALYTICAL)
+  id                  String         @id @default(uuid())
+  text                String         @db.VarChar(1000)
+  description         String?        @db.VarChar(2000)
+  category            QuestionCategory
+  status              QuestionStatus @default(OPEN)
   
-  // Asker (can be agent or anonymous)
-  askerId         String?
-  asker           Agent?   @relation("QuestionAsker", fields: [askerId], references: [id])
+  // Consensus settings
+  minAnswers          Int            @default(3)
+  maxAnswers          Int?           @default(100)
+  consensusThreshold  Decimal        @default(0.7) @db.Decimal(3, 2)
   
-  // Economics
-  rewardPool      Float    @default(0)
-  
-  // Status
-  status          QuestionStatus @default(OPEN)
-  debateRounds    Int      @default(0)
-  maxDebateRounds Int      @default(3)
-  
-  // Timing
-  answersOpenUntil  DateTime?
-  debateEndsAt      DateTime?
-  
-  // Consensus result
-  consensusAnswerId String?  @unique
-  consensusAnswer   Answer?  @relation("ConsensusAnswer", fields: [consensusAnswerId], references: [id])
-  confidenceScore   Float?
-  
-  // Verification (for factual/predictive questions)
-  verificationData  Json?
-  verifiedAt        DateTime?
-  verifiedResult    String?
-  
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  // Lifecycle timestamps
+  createdAt           DateTime       @default(now())
+  openUntil           DateTime?
+  consensusReachedAt  DateTime?
+  verifiedAt          DateTime?
   
   // Relations
-  answers         Answer[] @relation("QuestionAnswers")
-  debateRoundRecords DebateRound[]
-
-  @@index([status])
-  @@index([category])
-  @@index([createdAt(sort: Desc)])
+  answers             Answer[]
+  debateRounds        DebateRound[]
+  consensusLogs       ConsensusLog[]
+  consensusWeights    ConsensusWeight[]
+  
+  // High-frequency query optimization
+  @@index([status, createdAt(sort: Desc)], name: "idx_questions_status_created")
+  @@index([category, status], name: "idx_questions_category_status")
+  @@index([consensusReachedAt(sort: Desc)], name: "idx_questions_consensus_reached", where: { consensusReachedAt: { not: null } })
+  @@map("questions")
 }
-
-enum QuestionCategory {
-  FACTUAL      // Can be verified immediately
-  PREDICTIVE   // Verified in the future
-  ANALYTICAL   // Community/quality judged
-  SUBJECTIVE   // No verification
-}
-
-enum QuestionStatus {
-  OPEN         // Accepting answers
-  DEBATING     // In debate phase
-  CONSENSUS    // Consensus reached, awaiting verification
-  VERIFIED     // Verified and rewards distributed
-  CLOSED       // Closed without resolution
-}
-
-// ============================================
-// ANSWERS
-// ============================================
 
 model Answer {
-  id              String   @id @default(uuid())
+  id                  String    @id @default(uuid())
+  questionId          String
+  agentId             String
+  question            Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  agent               Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
   
-  // Question link
-  questionId      String
-  question        Question @relation("QuestionAnswers", fields: [questionId], references: [id])
+  // Core content
+  content             String    @db.VarChar(2000)
+  reasoning           String    @db.VarChar(5000)
+  confidence          Decimal   @db.Decimal(3, 2) // 0.00 to 1.00
   
-  // Agent who answered
-  agentId         String
-  agent           Agent    @relation(fields: [agentId], references: [id])
+  // Consensus calculation fields
+  initialWeight       Decimal?  @db.Decimal(8, 6)
+  finalWeight         Decimal?  @db.Decimal(8, 6)
+  consensusRank       Int?
   
-  // Content
-  content         String   // The actual answer
-  reasoning       String   // Explanation/reasoning
-  confidence      Float    @default(0.5) // 0-1 self-reported confidence
-  
-  // Versioning (for debate refinements)
-  version         Int      @default(1)
-  previousContent String?  // Content before refinement
-  
-  // Economics
-  stakeAmount     Float    @default(0)
-  
-  // Scoring (calculated)
-  qualityScore    Float?   // Meta-model judged
-  agreementScore  Float?   // How much others agree
-  finalWeight     Float?   // Combined weight for consensus
-  
-  // Outcome
-  isCorrect       Boolean?
-  rewardEarned    Float    @default(0)
-  slashAmount     Float    @default(0)
-  
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  // Lifecycle
+  submittedAt         DateTime  @default(now())
   
   // Relations
-  critiquesReceived Critique[] @relation("CritiqueTarget")
-  consensusFor      Question?  @relation("ConsensusAnswer")
-  stakes            Stake[]
-
-  @@unique([questionId, agentId]) // One answer per agent per question
-  @@index([questionId])
-  @@index([agentId])
+  stakes              Stake[]
+  critiques           Critique[]
+  consensusWeights    ConsensusWeight[]
+  
+  // Consensus calculation optimization
+  @@index([questionId, agentId], name: "idx_answers_question_agent")
+  @@index([questionId, finalWeight(sort: Desc)], name: "idx_answers_question_weight")
+  @@index([agentId, submittedAt(sort: Desc)], name: "idx_answers_agent_created")
+  @@unique([questionId, agentId], name: "one_answer_per_agent")
+  @@map("answers")
 }
 
-// ============================================
-// DEBATE
-// ============================================
+// Fast consensus calculation table
+model ConsensusWeight {
+  questionId          String
+  answerId            String
+  agentId             String
+  question            Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answer              Answer    @relation(fields: [answerId], references: [id], onDelete: Cascade)
+  
+  finalWeight         Decimal   @db.Decimal(8, 6)
+  rank                Int
+  calculatedAt        DateTime  @default(now())
+  
+  @@id([questionId, answerId])
+  @@index([questionId, finalWeight(sort: Desc)], name: "idx_consensus_weights_question")
+  @@map("consensus_weights")
+}
+
+model Stake {
+  id                  String      @id @default(uuid())
+  answerId            String
+  agentId             String
+  answer              Answer      @relation(fields: [answerId], references: [id], onDelete: Cascade)
+  agent               Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  amount              Decimal     @db.Decimal(12, 2)
+  status              StakeStatus @default(ACTIVE)
+  
+  // Lifecycle
+  stakedAt            DateTime    @default(now())
+  resolvedAt          DateTime?
+  
+  // Performance index
+  @@index([answerId, status], name: "idx_stakes_answer_status")
+  @@index([agentId, stakedAt(sort: Desc)], name: "idx_stakes_agent_staked")
+  @@map("stakes")
+}
 
 model DebateRound {
-  id              String   @id @default(uuid())
+  id                  String     @id @default(uuid())
+  questionId          String
+  question            Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
   
-  questionId      String
-  question        Question @relation(fields: [questionId], references: [id])
-  
-  roundNumber     Int
-  
-  startedAt       DateTime @default(now())
-  endedAt         DateTime?
+  roundNumber         Int
+  topic               String     @db.VarChar(500)
+  startedAt           DateTime   @default(now())
+  endedAt             DateTime?
   
   // Relations
-  critiques       Critique[]
-
-  @@unique([questionId, roundNumber])
-  @@index([questionId])
+  critiques           Critique[]
+  
+  // Real-time queries
+  @@index([questionId, roundNumber(sort: Desc)], name: "idx_debate_rounds_question_number")
+  @@unique([questionId, roundNumber], name: "unique_round_per_question")
+  @@map("debate_rounds")
 }
 
 model Critique {
-  id              String   @id @default(uuid())
+  id                  String      @id @default(uuid())
+  debateRoundId       String
+  agentId             String
+  debateRound         DebateRound @relation(fields: [debateRoundId], references: [id], onDelete: Cascade)
+  agent               Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
   
-  // Round link
-  debateRoundId   String
-  debateRound     DebateRound @relation(fields: [debateRoundId], references: [id])
+  targetAnswerId      String
+  targetAnswer        Answer      @relation(fields: [targetAnswerId], references: [id], onDelete: Cascade)
   
-  // Critic
-  criticAgentId   String
-  criticAgent     Agent    @relation(fields: [criticAgentId], references: [id])
+  content             String      @db.VarChar(2000)
+  type                CritiqueType @default(IMPROVEMENT)
+  impact              Decimal     @db.Decimal(3, 2) // Impact score 0-1
   
-  // Target answer
-  targetAnswerId  String
-  targetAnswer    Answer   @relation("CritiqueTarget", fields: [targetAnswerId], references: [id])
+  createdAt           DateTime    @default(now())
   
-  // Content
-  content         String
-  critiqueType    CritiqueType
-  
-  createdAt       DateTime @default(now())
-
-  @@index([debateRoundId])
-  @@index([targetAnswerId])
+  @@index([debateRoundId, createdAt(sort: Desc)], name: "idx_critiques_round_created")
+  @@map("critiques")
 }
 
-enum CritiqueType {
-  AGREE       // Supports the answer
-  DISAGREE    // Challenges the answer
-  PARTIAL     // Partially agrees
-  QUESTION    // Asks for clarification
-  EVIDENCE    // Provides supporting/contradicting evidence
+model ConsensusLog {
+  id                  String    @id @default(uuid())
+  questionId          String
+  question            Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  
+  algorithm           String    @db.VarChar(50) // 'BFT', 'DPoR', 'Hybrid'
+  
+  // Optimized: moved large JSON to separate fields
+  participantCount    Int
+  confidenceLevel     Decimal   @db.Decimal(5, 4)
+  
+  // Consensus results (normalized)
+  winningAnswerId     String?
+  consensusStrength   Decimal   @db.Decimal(5, 4)
+  
+  // Processing metadata
+  calculationTimeMs   Int
+  createdAt           DateTime  @default(now())
+  
+  @@index([questionId, createdAt(sort: Desc)], name: "idx_consensus_logs_question")
+  @@map("consensus_logs")
 }
 
-// ============================================
-// ECONOMICS
-// ============================================
+// Enums
+enum QuestionStatus {
+  OPEN
+  DEBATING
+  CONSENSUS
+  VERIFIED
+  CLOSED
+}
 
-model Stake {
-  id              String   @id @default(uuid())
-  
-  agentId         String
-  agent           Agent    @relation(fields: [agentId], references: [id])
-  
-  answerId        String
-  answer          Answer   @relation(fields: [answerId], references: [id])
-  
-  amount          Float
-  
-  // Outcome
-  status          StakeStatus @default(ACTIVE)
-  returnAmount    Float?
-  
-  createdAt       DateTime @default(now())
-  resolvedAt      DateTime?
-
-  @@index([agentId])
-  @@index([answerId])
+enum QuestionCategory {
+  FACTUAL
+  PREDICTIVE
+  ANALYTICAL
+  CREATIVE
+  TECHNICAL
 }
 
 enum StakeStatus {
-  ACTIVE      // Stake is live
-  WON         // Agent won, stake + rewards returned
-  LOST        // Agent lost, stake slashed
-  PARTIAL     // Partial return
-  REFUNDED    // Question closed, stake refunded
+  ACTIVE
+  WON
+  LOST
+  REFUNDED
 }
 
-// ============================================
-// CONSENSUS LOGS
-// ============================================
-
-model ConsensusLog {
-  id              String   @id @default(uuid())
-  
-  questionId      String   @unique
-  
-  // Result
-  finalAnswer     String
-  confidenceScore Float
-  methodology     String   // weighted_vote, unanimous, majority, meta_model
-  
-  // Contributing agents and their weights
-  contributions   Json     // Array of {agentId, weight, answer}
-  
-  // Dissenting views
-  dissentingViews Json?    // Array of alternative answers
-  
-  // Reasoning summary
-  reasoningSummary String?
-  
-  createdAt       DateTime @default(now())
-
-  @@index([questionId])
+enum CritiqueType {
+  FACTUAL_ERROR
+  LOGICAL_FLAW
+  MISSING_CONTEXT
+  IMPROVEMENT
 }
