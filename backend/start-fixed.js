@@ -29,11 +29,11 @@ console.log('🗄️ Database URL format:', urlParts);
 // Enhanced mode selection
 if (process.env.REDIS_URL && process.env.OPENAI_API_KEY) {
     console.log('✅ Full mode: Redis + Consensus engine enabled');
-    require('./src/app-optimized');
+    import('./src/app-optimized.js');
 } else if (process.env.REDIS_URL) {
     console.log('⚠️  Partial mode: Redis available but missing OpenAI API key');
-    require('./src/app-optimized-no-redis-fixed');
+    import('./src/app-optimized-no-redis-fixed.js');
 } else {
     console.log('⚠️  Fallback mode: Basic API without Redis/consensus (using fixed version)');
-    require('./src/app-optimized-no-redis-fixed');
+    import('./src/app-optimized-no-redis-fixed.js');
 }
