@@ -1,87 +1,188 @@
-/**
- * Authentication and Rate Limiting Middleware
- */
+import jwt from 'jsonwebtoken';
+import { prisma } from '../lib/prisma.js';
 
-const jwt = require('jsonwebtoken');
-const rateLimit = require('express-rate-limit');
-const { PrismaClient } = require('@prisma/client');
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 
-const prisma = new PrismaClient();
+// Generate JWT token for agent
+export const generateToken = (agentId, expiresIn = '24h') => {
+  return jwt.sign(
+    { agentId, type: 'agent' },
+    JWT_SECRET,
+    { expiresIn }
+  );
+};
 
-/**
- * Authenticate Agent via JWT
- */
-const authenticateAgent = async (req, res, next) => {
-    try {
-        const token = req.headers.authorization?.split(' ')[1] || req.query.token;
-        
-        if (!token) {
-            return res.status(401).json({
-                success: false,
-                error: 'Authentication token required'
-            });
-        }
-        
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'swarm-oracle-secret');
-        
-        const agent = await prisma.agent.findUnique({
-            where: { id: decoded.sub },
-            select: {
-                id: true,
-                name: true,
-                reputationScore: true,
-                isActive: true,
-                capabilities: true
-            }
-        });
-        
-        if (!agent || !agent.isActive) {
-            return res.status(401).json({
-                success: false,
-                error: 'Invalid or inactive agent'
-            });
-        }
-        
-        req.agent = agent;
-        next();
-        
-    } catch (error) {
-        console.error('Authentication error:', error);
-        res.status(401).json({
-            success: false,
-            error: 'Invalid authentication token'
-        });
+// Verify JWT token
+export const verifyToken = (token) => {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (error) {
+    return null;
+  }
+};
+
+// Auth middleware - optional authentication
+export const optionalAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      req.agent = null;
+      return next();
     }
-};
 
-/**
- * Rate limiting based on reputation
- */
-const checkRateLimit = (req, res, next) => {
-    const reputation = req.agent?.reputationScore || 0;
-    
-    // Higher reputation = higher rate limits
-    let maxRequests = 10; // Base rate
-    if (reputation > 80) maxRequests = 100;
-    else if (reputation > 60) maxRequests = 50;
-    else if (reputation > 40) maxRequests = 25;
-    
-    const limiter = rateLimit({
-        windowMs: 60 * 1000, // 1 minute
-        max: maxRequests,
-        message: {
-            success: false,
-            error: 'Rate limit exceeded',
-            retryAfter: '1 minute'
-        },
-        standardHeaders: true,
-        legacyHeaders: false,
+    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+    const decoded = verifyToken(token);
+
+    if (!decoded || decoded.type !== 'agent') {
+      req.agent = null;
+      return next();
+    }
+
+    // Verify agent exists and is active
+    const agent = await prisma.agent.findUnique({
+      where: { id: decoded.agentId },
+      select: {
+        id: true,
+        name: true,
+        platform: true,
+        reputationScore: true,
+        lastActiveAt: true,
+      }
     });
-    
-    limiter(req, res, next);
+
+    if (!agent) {
+      req.agent = null;
+      return next();
+    }
+
+    req.agent = agent;
+    next();
+  } catch (error) {
+    console.error('Optional auth error:', error);
+    req.agent = null;
+    next();
+  }
 };
 
-module.exports = {
-    authenticateAgent,
-    checkRateLimit
+// Auth middleware - required authentication
+export const requireAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        message: 'Authorization header with Bearer token is required'
+      });
+    }
+
+    const token = authHeader.substring(7);
+    const decoded = verifyToken(token);
+
+    if (!decoded || decoded.type !== 'agent') {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token',
+        message: 'Token is invalid or expired'
+      });
+    }
+
+    // Verify agent exists and is active
+    const agent = await prisma.agent.findUnique({
+      where: { id: decoded.agentId },
+      select: {
+        id: true,
+        name: true,
+        platform: true,
+        reputationScore: true,
+        totalAnswers: true,
+        accuracyRate: true,
+        lastActiveAt: true,
+        createdAt: true,
+      }
+    });
+
+    if (!agent) {
+      return res.status(401).json({
+        success: false,
+        error: 'Agent not found',
+        message: 'The authenticated agent no longer exists'
+      });
+    }
+
+    // Update last active timestamp (async, don't wait)
+    prisma.agent.update({
+      where: { id: agent.id },
+      data: { lastActiveAt: new Date() }
+    }).catch(console.error);
+
+    req.agent = agent;
+    next();
+  } catch (error) {
+    console.error('Auth error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Authentication error',
+      message: 'An error occurred during authentication'
+    });
+  }
+};
+
+// Rate limiting by agent
+export const agentRateLimit = (maxRequests = 100, windowMs = 60000) => {
+  const requests = new Map();
+
+  return (req, res, next) => {
+    if (!req.agent) {
+      return next();
+    }
+
+    const agentId = req.agent.id;
+    const now = Date.now();
+    const windowStart = now - windowMs;
+
+    // Clean old requests
+    if (requests.has(agentId)) {
+      const agentRequests = requests.get(agentId).filter(time => time > windowStart);
+      requests.set(agentId, agentRequests);
+    } else {
+      requests.set(agentId, []);
+    }
+
+    const agentRequests = requests.get(agentId);
+
+    if (agentRequests.length >= maxRequests) {
+      return res.status(429).json({
+        success: false,
+        error: 'Rate limit exceeded',
+        message: `Too many requests. Limit: ${maxRequests} per ${windowMs/1000} seconds`,
+        retryAfter: Math.ceil((agentRequests[0] + windowMs - now) / 1000)
+      });
+    }
+
+    // Add current request
+    agentRequests.push(now);
+    requests.set(agentId, agentRequests);
+
+    next();
+  };
+};
+
+// Admin auth (for system operations)
+export const requireAdmin = (req, res, next) => {
+  // For now, check if it's a system operation with admin token
+  const adminToken = req.headers['x-admin-token'];
+  const expectedAdminToken = process.env.ADMIN_TOKEN;
+
+  if (!expectedAdminToken || adminToken !== expectedAdminToken) {
+    return res.status(403).json({
+      success: false,
+      error: 'Admin access required',
+      message: 'This operation requires admin privileges'
+    });
+  }
+
+  next();
 };

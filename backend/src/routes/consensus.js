@@ -1,220 +1,145 @@
-/**
- * Consensus Routes
- * Calculate and retrieve consensus for questions
- */
-
-const express = require('express');
-const { PrismaClient } = require('@prisma/client');
+import express from 'express';
+import { prisma } from '../lib/prisma.js';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { asyncHandler, NotFoundError, BusinessLogicError } from '../middleware/errorHandler.js';
+import { 
+  calculateConsensusSchema,
+  questionIdParamSchema,
+  validateSchema 
+} from '../validation/schemas.js';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
-/**
- * Consensus Weight Formula
- * 
- * Weight = (ReputationScore × 0.4) + 
- *          (StakeAmount × 0.3) + 
- *          (ReasoningQuality × 0.2) + 
- *          (AgreementScore × 0.1)
- */
-function calculateWeight(answer, agent, agreementScore, maxStake) {
-  const reputationWeight = (agent.reputationScore / 1000) * 0.4;
-  const stakeWeight = (maxStake > 0 ? answer.stakeAmount / maxStake : 0) * 0.3;
-  const qualityWeight = (answer.qualityScore || answer.confidence) * 0.2;
-  const agreementWeight = agreementScore * 0.1;
-  
-  return reputationWeight + stakeWeight + qualityWeight + agreementWeight;
-}
-
-/**
- * Calculate agreement score between answers
- * Simple: how many other answers are similar
- */
-function calculateAgreementScores(answers) {
-  // For MVP: simple string similarity check
-  // TODO: Use embeddings for semantic similarity
-  const scores = {};
-  
-  for (const answer of answers) {
-    let agreementCount = 0;
-    const contentLower = answer.content.toLowerCase();
-    
-    for (const other of answers) {
-      if (other.id === answer.id) continue;
-      const otherLower = other.content.toLowerCase();
-      
-      // Simple overlap check
-      const words = contentLower.split(/\s+/);
-      const otherWords = otherLower.split(/\s+/);
-      const overlap = words.filter(w => otherWords.includes(w)).length;
-      const similarity = overlap / Math.max(words.length, otherWords.length);
-      
-      if (similarity > 0.3) agreementCount++;
-    }
-    
-    scores[answer.id] = answers.length > 1 
-      ? agreementCount / (answers.length - 1) 
-      : 0;
-  }
-  
-  return scores;
-}
-
-/**
- * POST /api/consensus/:questionId/calculate
- * Trigger consensus calculation for a question
- */
-router.post('/:questionId/calculate', async (req, res) => {
-  try {
+// POST /api/consensus/calculate/:questionId - Trigger consensus calculation
+router.post('/calculate/:questionId',
+  requireAuth, // Can be changed to requireAdmin for restricted access
+  validateSchema(questionIdParamSchema, 'params'),
+  validateSchema(calculateConsensusSchema, 'body'),
+  asyncHandler(async (req, res) => {
     const { questionId } = req.params;
+    const { algorithm, forceRecalculation } = req.body;
 
-    // Get question with answers
+    // Check if question exists
     const question = await prisma.question.findUnique({
       where: { id: questionId },
       include: {
         answers: {
           include: {
-            agent: true
+            agent: {
+              select: {
+                id: true,
+                reputationScore: true,
+                accuracyRate: true,
+              }
+            },
+            stakes: {
+              where: { status: 'ACTIVE' },
+              select: {
+                amount: true,
+                agent: {
+                  select: {
+                    reputationScore: true,
+                  }
+                }
+              }
+            }
           }
+        },
+        consensusLogs: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
         }
       }
     });
 
     if (!question) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Question not found' 
-      });
+      throw new NotFoundError('Question not found');
     }
 
-    if (question.answers.length < 1) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'No answers to calculate consensus from' 
-      });
-    }
-
-    // Calculate agreement scores
-    const agreementScores = calculateAgreementScores(question.answers);
-    
-    // Find max stake for normalization
-    const maxStake = Math.max(...question.answers.map(a => a.stakeAmount), 1);
-    
-    // Calculate weights for each answer
-    const answerWeights = question.answers.map(answer => {
-      const weight = calculateWeight(
-        answer, 
-        answer.agent, 
-        agreementScores[answer.id],
-        maxStake
+    // Check if question has enough answers
+    if (question.answers.length < question.minAnswers) {
+      throw new BusinessLogicError(
+        `Question needs at least ${question.minAnswers} answers for consensus calculation`
       );
-      return {
-        answerId: answer.id,
-        agentId: answer.agentId,
-        agentName: answer.agent.name,
-        content: answer.content,
-        reasoning: answer.reasoning,
-        weight,
-        confidence: answer.confidence,
-        stake: answer.stakeAmount,
-        agreementScore: agreementScores[answer.id],
-      };
+    }
+
+    // Check if consensus already calculated recently (unless forced)
+    const latestConsensus = question.consensusLogs[0];
+    if (latestConsensus && !forceRecalculation) {
+      const hoursSinceLastCalculation = 
+        (Date.now() - latestConsensus.createdAt.getTime()) / (1000 * 60 * 60);
+      
+      if (hoursSinceLastCalculation < 1) { // Less than 1 hour ago
+        return res.json({
+          success: true,
+          data: {
+            message: 'Consensus was calculated recently',
+            lastCalculated: latestConsensus.createdAt,
+            algorithm: latestConsensus.algorithm,
+          }
+        });
+      }
+    }
+
+    // Calculate consensus based on algorithm
+    const startTime = Date.now();
+    const consensusResult = await calculateConsensus(question, algorithm);
+    const calculationTimeMs = Date.now() - startTime;
+
+    // Save consensus results
+    const consensusLog = await prisma.consensusLog.create({
+      data: {
+        questionId,
+        algorithm,
+        participantCount: question.answers.length,
+        confidenceLevel: consensusResult.confidenceLevel,
+        winningAnswerId: consensusResult.winningAnswer?.id || null,
+        consensusStrength: consensusResult.consensusStrength,
+        calculationTimeMs,
+      }
     });
 
-    // Sort by weight
-    answerWeights.sort((a, b) => b.weight - a.weight);
-    
-    // Get consensus (highest weight)
-    const consensus = answerWeights[0];
-    const totalWeight = answerWeights.reduce((sum, a) => sum + a.weight, 0);
-    const confidenceScore = totalWeight > 0 
-      ? (consensus.weight / totalWeight) * 100 
-      : 0;
+    // Update answer weights and ranks
+    await updateAnswerWeights(questionId, consensusResult.rankedAnswers);
 
-    // Identify dissenting views (significant weight but different answer)
-    const dissenting = answerWeights.slice(1).filter(a => a.weight > consensus.weight * 0.3);
-
-    // Update answers with calculated weights
-    for (const aw of answerWeights) {
-      await prisma.answer.update({
-        where: { id: aw.answerId },
-        data: {
-          finalWeight: aw.weight,
-          agreementScore: aw.agreementScore,
+    // Update question status if consensus reached
+    if (consensusResult.consensusReached) {
+      await prisma.question.update({
+        where: { id: questionId },
+        data: { 
+          status: 'CONSENSUS',
+          consensusReachedAt: new Date(),
         }
       });
     }
 
-    // Update question with consensus
-    await prisma.question.update({
-      where: { id: questionId },
-      data: {
-        status: 'CONSENSUS',
-        consensusAnswerId: consensus.answerId,
-        confidenceScore,
-      }
-    });
-
-    // Log consensus
-    const log = await prisma.consensusLog.upsert({
-      where: { questionId },
-      create: {
-        questionId,
-        finalAnswer: consensus.content,
-        confidenceScore,
-        methodology: 'weighted_vote',
-        contributions: answerWeights,
-        dissentingViews: dissenting.length > 0 ? dissenting : null,
-        reasoningSummary: consensus.reasoning,
-      },
-      update: {
-        finalAnswer: consensus.content,
-        confidenceScore,
-        contributions: answerWeights,
-        dissentingViews: dissenting.length > 0 ? dissenting : null,
-        reasoningSummary: consensus.reasoning,
-      }
-    });
-
     res.json({
       success: true,
-      message: 'Consensus calculated! 🎯',
-      consensus: {
-        answer: consensus.content,
-        reasoning: consensus.reasoning,
-        agent: consensus.agentName,
-        confidenceScore: Math.round(confidenceScore),
-        methodology: 'weighted_vote',
+      data: {
+        consensus: {
+          id: consensusLog.id,
+          algorithm,
+          consensusReached: consensusResult.consensusReached,
+          confidenceLevel: consensusResult.confidenceLevel,
+          consensusStrength: consensusResult.consensusStrength,
+          participantCount: question.answers.length,
+          calculationTime: `${calculationTimeMs}ms`,
+        },
+        results: consensusResult.rankedAnswers.slice(0, 5), // Top 5 answers
+        winningAnswer: consensusResult.winningAnswer,
       },
-      contributions: answerWeights,
-      dissenting: dissenting.length > 0 ? dissenting : null,
+      message: consensusResult.consensusReached 
+        ? 'Consensus reached successfully' 
+        : 'Consensus calculation completed (threshold not met)'
     });
+  })
+);
 
-  } catch (error) {
-    console.error('Consensus calculation error:', error);
-    res.status(500).json({ success: false, error: 'Failed to calculate consensus' });
-  }
-});
-
-/**
- * GET /api/consensus/:questionId
- * Get consensus result for a question
- */
-router.get('/:questionId', async (req, res) => {
-  try {
+// GET /api/consensus/:questionId - Get consensus results
+router.get('/:questionId',
+  validateSchema(questionIdParamSchema, 'params'),
+  asyncHandler(async (req, res) => {
     const { questionId } = req.params;
-
-    const log = await prisma.consensusLog.findUnique({
-      where: { questionId }
-    });
-
-    if (!log) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Consensus not yet calculated',
-        hint: 'POST /api/consensus/:questionId/calculate to trigger'
-      });
-    }
 
     const question = await prisma.question.findUnique({
       where: { id: questionId },
@@ -222,28 +147,351 @@ router.get('/:questionId', async (req, res) => {
         id: true,
         text: true,
         status: true,
-        confidenceScore: true,
+        consensusThreshold: true,
+        consensusReachedAt: true,
       }
     });
 
-    res.json({
-      success: true,
-      question,
-      consensus: {
-        answer: log.finalAnswer,
-        confidenceScore: Math.round(log.confidenceScore),
-        methodology: log.methodology,
-        reasoning: log.reasoningSummary,
-      },
-      contributions: log.contributions,
-      dissenting: log.dissentingViews,
-      calculatedAt: log.createdAt,
+    if (!question) {
+      throw new NotFoundError('Question not found');
+    }
+
+    // Get latest consensus calculation
+    const latestConsensus = await prisma.consensusLog.findFirst({
+      where: { questionId },
+      orderBy: { createdAt: 'desc' },
     });
 
-  } catch (error) {
-    console.error('Consensus fetch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch consensus' });
-  }
-});
+    if (!latestConsensus) {
+      return res.json({
+        success: true,
+        data: {
+          question,
+          consensus: null,
+          message: 'No consensus calculation available'
+        }
+      });
+    }
 
-module.exports = router;
+    // Get consensus weights
+    const consensusWeights = await prisma.consensusWeight.findMany({
+      where: { questionId },
+      include: {
+        answer: {
+          include: {
+            agent: {
+              select: {
+                id: true,
+                name: true,
+                reputationScore: true,
+              }
+            }
+          }
+        }
+      },
+      orderBy: { rank: 'asc' }
+    });
+
+    const response = {
+      question,
+      consensus: {
+        id: latestConsensus.id,
+        algorithm: latestConsensus.algorithm,
+        participantCount: latestConsensus.participantCount,
+        confidenceLevel: latestConsensus.confidenceLevel,
+        consensusStrength: latestConsensus.consensusStrength,
+        winningAnswerId: latestConsensus.winningAnswerId,
+        calculatedAt: latestConsensus.createdAt,
+        calculationTime: `${latestConsensus.calculationTimeMs}ms`,
+        consensusReached: question.consensusReachedAt !== null,
+      },
+      rankedAnswers: consensusWeights.map(cw => ({
+        rank: cw.rank,
+        weight: cw.finalWeight,
+        answer: {
+          id: cw.answer.id,
+          content: cw.answer.content,
+          confidence: cw.answer.confidence,
+          submittedAt: cw.answer.submittedAt,
+          agent: cw.answer.agent,
+        }
+      }))
+    };
+
+    res.json({
+      success: true,
+      data: response,
+    });
+  })
+);
+
+// GET /api/consensus/weights/:questionId - Get weighted answer rankings
+router.get('/weights/:questionId',
+  validateSchema(questionIdParamSchema, 'params'),
+  asyncHandler(async (req, res) => {
+    const { questionId } = req.params;
+
+    // Check if question exists
+    const question = await prisma.question.findUnique({
+      where: { id: questionId },
+      select: { id: true, text: true }
+    });
+
+    if (!question) {
+      throw new NotFoundError('Question not found');
+    }
+
+    // Get consensus weights with detailed answer information
+    const weights = await prisma.consensusWeight.findMany({
+      where: { questionId },
+      include: {
+        answer: {
+          include: {
+            agent: {
+              select: {
+                id: true,
+                name: true,
+                platform: true,
+                reputationScore: true,
+              }
+            },
+            _count: {
+              select: {
+                stakes: true,
+                critiques: true,
+              }
+            }
+          }
+        }
+      },
+      orderBy: { rank: 'asc' }
+    });
+
+    if (weights.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          question,
+          weights: [],
+          message: 'No consensus weights available - run consensus calculation first'
+        }
+      });
+    }
+
+    const formattedWeights = weights.map(weight => ({
+      rank: weight.rank,
+      finalWeight: weight.finalWeight,
+      calculatedAt: weight.calculatedAt,
+      answer: {
+        id: weight.answer.id,
+        content: weight.answer.content,
+        reasoning: weight.answer.reasoning,
+        confidence: weight.answer.confidence,
+        initialWeight: weight.answer.initialWeight,
+        submittedAt: weight.answer.submittedAt,
+        stakeCount: weight.answer._count.stakes,
+        critiqueCount: weight.answer._count.critiques,
+        agent: weight.answer.agent,
+      }
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        question,
+        weights: formattedWeights,
+        summary: {
+          totalAnswers: weights.length,
+          topWeight: weights[0]?.finalWeight || 0,
+          weightDistribution: calculateWeightDistribution(weights),
+        }
+      }
+    });
+  })
+);
+
+// Helper function to calculate consensus using different algorithms
+async function calculateConsensus(question, algorithm) {
+  const answers = question.answers;
+  
+  switch (algorithm) {
+    case 'BFT':
+      return calculateBFTConsensus(answers, question.consensusThreshold);
+    case 'DPoR':
+      return calculateDPoRConsensus(answers, question.consensusThreshold);
+    case 'Hybrid':
+    default:
+      return calculateHybridConsensus(answers, question.consensusThreshold);
+  }
+}
+
+// Byzantine Fault Tolerance algorithm
+function calculateBFTConsensus(answers, threshold) {
+  // Simple BFT: answers with >2/3 agreement by reputation-weighted vote
+  const totalReputation = answers.reduce((sum, answer) => 
+    sum + Number(answer.agent.reputationScore), 0
+  );
+
+  const rankedAnswers = answers.map(answer => {
+    const reputationWeight = Number(answer.agent.reputationScore) / totalReputation;
+    const confidenceWeight = Number(answer.confidence);
+    const finalWeight = reputationWeight * 0.7 + confidenceWeight * 0.3;
+
+    return {
+      ...answer,
+      finalWeight,
+      rank: 0, // Will be set after sorting
+    };
+  }).sort((a, b) => b.finalWeight - a.finalWeight);
+
+  // Assign ranks
+  rankedAnswers.forEach((answer, index) => {
+    answer.rank = index + 1;
+  });
+
+  const topWeight = rankedAnswers[0]?.finalWeight || 0;
+  const consensusStrength = topWeight;
+  const consensusReached = consensusStrength >= threshold;
+
+  return {
+    consensusReached,
+    consensusStrength,
+    confidenceLevel: consensusStrength,
+    rankedAnswers,
+    winningAnswer: consensusReached ? rankedAnswers[0] : null,
+  };
+}
+
+// Delegated Proof of Reputation algorithm
+function calculateDPoRConsensus(answers, threshold) {
+  // Weight answers by agent reputation and stakes received
+  const rankedAnswers = answers.map(answer => {
+    const reputationScore = Number(answer.agent.reputationScore);
+    const stakesWeight = answer.stakes.reduce((sum, stake) => 
+      sum + (Number(stake.amount) * Number(stake.agent.reputationScore)), 0
+    );
+    
+    const finalWeight = (reputationScore * 0.6) + (stakesWeight * 0.4);
+
+    return {
+      ...answer,
+      finalWeight: finalWeight / 1000, // Normalize
+      rank: 0,
+    };
+  }).sort((a, b) => b.finalWeight - a.finalWeight);
+
+  // Assign ranks
+  rankedAnswers.forEach((answer, index) => {
+    answer.rank = index + 1;
+  });
+
+  const topWeight = rankedAnswers[0]?.finalWeight || 0;
+  const secondWeight = rankedAnswers[1]?.finalWeight || 0;
+  const consensusStrength = topWeight - secondWeight; // Lead margin
+  const consensusReached = consensusStrength >= threshold;
+
+  return {
+    consensusReached,
+    consensusStrength,
+    confidenceLevel: topWeight,
+    rankedAnswers,
+    winningAnswer: consensusReached ? rankedAnswers[0] : null,
+  };
+}
+
+// Hybrid algorithm (combines BFT and DPoR)
+function calculateHybridConsensus(answers, threshold) {
+  const bftResult = calculateBFTConsensus(answers, threshold);
+  const dporResult = calculateDPoRConsensus(answers, threshold);
+
+  // Combine weights from both algorithms
+  const combinedAnswers = answers.map(answer => {
+    const bftAnswer = bftResult.rankedAnswers.find(a => a.id === answer.id);
+    const dporAnswer = dporResult.rankedAnswers.find(a => a.id === answer.id);
+    
+    const finalWeight = (bftAnswer.finalWeight * 0.5) + (dporAnswer.finalWeight * 0.5);
+    
+    return {
+      ...answer,
+      finalWeight,
+      rank: 0,
+    };
+  }).sort((a, b) => b.finalWeight - a.finalWeight);
+
+  // Assign ranks
+  combinedAnswers.forEach((answer, index) => {
+    answer.rank = index + 1;
+  });
+
+  const topWeight = combinedAnswers[0]?.finalWeight || 0;
+  const consensusStrength = topWeight;
+  const consensusReached = consensusStrength >= threshold;
+
+  return {
+    consensusReached,
+    consensusStrength,
+    confidenceLevel: (bftResult.confidenceLevel + dporResult.confidenceLevel) / 2,
+    rankedAnswers: combinedAnswers,
+    winningAnswer: consensusReached ? combinedAnswers[0] : null,
+  };
+}
+
+// Update answer weights in database
+async function updateAnswerWeights(questionId, rankedAnswers) {
+  // Delete existing consensus weights
+  await prisma.consensusWeight.deleteMany({
+    where: { questionId }
+  });
+
+  // Insert new weights
+  const weightData = rankedAnswers.map(answer => ({
+    questionId,
+    answerId: answer.id,
+    agentId: answer.agentId,
+    finalWeight: answer.finalWeight,
+    rank: answer.rank,
+  }));
+
+  await prisma.consensusWeight.createMany({
+    data: weightData
+  });
+
+  // Update individual answer weights
+  for (const answer of rankedAnswers) {
+    await prisma.answer.update({
+      where: { id: answer.id },
+      data: {
+        finalWeight: answer.finalWeight,
+        consensusRank: answer.rank,
+      }
+    });
+  }
+}
+
+// Helper to calculate weight distribution
+function calculateWeightDistribution(weights) {
+  if (weights.length === 0) return { uniform: true, gini: 0 };
+
+  const weightValues = weights.map(w => Number(w.finalWeight)).sort((a, b) => a - b);
+  const n = weightValues.length;
+  const mean = weightValues.reduce((sum, w) => sum + w, 0) / n;
+  
+  // Calculate Gini coefficient for weight distribution
+  let giniSum = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      giniSum += Math.abs(weightValues[i] - weightValues[j]);
+    }
+  }
+  
+  const gini = giniSum / (2 * n * n * mean);
+  
+  return {
+    uniform: gini < 0.3,
+    gini: gini,
+    spread: (weightValues[n-1] - weightValues[0]),
+    mean,
+  };
+}
+
+export default router;

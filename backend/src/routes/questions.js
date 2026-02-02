@@ -1,373 +1,300 @@
-/**
- * Question Routes
- * Submit questions, browse, and view details
- */
-
-const express = require('express');
-const { PrismaClient } = require('@prisma/client');
-const { authenticateAgent } = require('../middleware/auth');
+import express from 'express';
+import { prisma } from '../lib/prisma.js';
+import { optionalAuth, requireAuth } from '../middleware/auth.js';
+import { asyncHandler, NotFoundError, BusinessLogicError } from '../middleware/errorHandler.js';
+import { 
+  createQuestionSchema, 
+  questionQuerySchema, 
+  closeQuestionSchema,
+  idParamSchema,
+  validateSchema 
+} from '../validation/schemas.js';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
-/**
- * POST /api/questions
- * Submit a new question
- */
-router.post('/', async (req, res) => {
-  try {
-    const { text, category, rewardPool } = req.body;
-
-    if (!text || text.length < 10) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Question text required (min 10 chars)' 
-      });
-    }
-
-    // Optional: authenticate asker
-    let askerId = null;
-    const apiKey = req.headers.authorization?.replace('Bearer ', '');
-    if (apiKey) {
-      const crypto = require('crypto');
-      const apiKeyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-      const agent = await prisma.agent.findFirst({ where: { apiKeyHash } });
-      if (agent) askerId = agent.id;
-    }
-
-    // Set answer deadline (default 2 hours)
-    const answersOpenUntil = new Date(Date.now() + 2 * 60 * 60 * 1000);
-
+// POST /api/questions - Create new question
+router.post('/', 
+  requireAuth,
+  validateSchema(createQuestionSchema, 'body'),
+  asyncHandler(async (req, res) => {
+    const { text, description, category, minAnswers, maxAnswers, consensusThreshold, openUntil } = req.body;
+    
+    // Create the question
     const question = await prisma.question.create({
       data: {
         text,
-        category: category?.toUpperCase() || 'ANALYTICAL',
-        askerId,
-        rewardPool: parseFloat(rewardPool) || 0,
-        answersOpenUntil,
+        description,
+        category,
+        minAnswers,
+        maxAnswers,
+        consensusThreshold,
+        openUntil: openUntil ? new Date(openUntil) : null,
+        status: 'OPEN',
       },
       include: {
-        asker: {
-          select: { id: true, name: true }
+        _count: {
+          select: {
+            answers: true,
+          }
         }
       }
     });
 
     res.status(201).json({
       success: true,
-      message: 'Question submitted! Agents can now answer. 🔮',
-      question,
-      nextSteps: [
-        'Wait for agents to submit answers',
-        'Debate phase will start after answers close',
-        'Consensus will be calculated automatically'
-      ]
+      data: {
+        ...question,
+        answerCount: question._count.answers,
+        _count: undefined, // Remove _count from response
+      },
+      message: 'Question created successfully'
     });
+  })
+);
 
-  } catch (error) {
-    console.error('Question creation error:', error);
-    res.status(500).json({ success: false, error: 'Failed to create question' });
-  }
-});
-
-/**
- * GET /api/questions
- * List questions with filters
- */
-router.get('/', async (req, res) => {
-  try {
-    const { 
-      status, 
-      category, 
-      limit = 20, 
-      offset = 0,
-      sort = 'newest' 
-    } = req.query;
-
+// GET /api/questions - List all questions with filters
+router.get('/',
+  optionalAuth,
+  validateSchema(questionQuerySchema, 'query'),
+  asyncHandler(async (req, res) => {
+    const { page, limit, status, category, sortBy, sortOrder } = req.query;
+    
+    const skip = (page - 1) * limit;
+    
+    // Build where clause
     const where = {};
-    if (status) where.status = status.toUpperCase();
-    if (category) where.category = category.toUpperCase();
+    if (status) where.status = status;
+    if (category) where.category = category;
 
-    const orderBy = sort === 'reward' 
-      ? { rewardPool: 'desc' }
-      : sort === 'answers'
-      ? { answers: { _count: 'desc' } }
-      : { createdAt: 'desc' };
-
-    const questions = await prisma.question.findMany({
-      where,
-      take: parseInt(limit),
-      skip: parseInt(offset),
-      orderBy,
-      include: {
-        asker: {
-          select: { id: true, name: true }
-        },
-        _count: {
-          select: { answers: true }
+    // Get questions with pagination
+    const [questions, totalCount] = await Promise.all([
+      prisma.question.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { [sortBy]: sortOrder },
+        include: {
+          _count: {
+            select: {
+              answers: true,
+            }
+          },
+          answers: {
+            select: {
+              id: true,
+              confidence: true,
+              submittedAt: true,
+              agent: {
+                select: {
+                  id: true,
+                  name: true,
+                  reputationScore: true,
+                }
+              }
+            },
+            orderBy: { finalWeight: 'desc' },
+            take: 3, // Show top 3 answers
+          }
         }
+      }),
+      prisma.question.count({ where })
+    ]);
+
+    // Format response
+    const formattedQuestions = questions.map(question => ({
+      ...question,
+      answerCount: question._count.answers,
+      topAnswers: question.answers,
+      _count: undefined,
+      answers: undefined,
+    }));
+
+    const totalPages = Math.ceil(totalCount / limit);
+
+    res.json({
+      success: true,
+      data: formattedQuestions,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalCount,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
       }
     });
+  })
+);
 
-    const total = await prisma.question.count({ where });
-
-    res.json({ 
-      success: true, 
-      count: questions.length,
-      total,
-      questions: questions.map(q => ({
-        ...q,
-        answerCount: q._count.answers
-      }))
-    });
-
-  } catch (error) {
-    console.error('Questions list error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch questions' });
-  }
-});
-
-/**
- * GET /api/questions/:id
- * Get question details
- */
-router.get('/:id', async (req, res) => {
-  try {
+// GET /api/questions/:id - Get question details with answers
+router.get('/:id',
+  optionalAuth,
+  validateSchema(idParamSchema, 'params'),
+  asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const question = await prisma.question.findUnique({
       where: { id },
       include: {
-        asker: {
-          select: { id: true, name: true }
-        },
-        answers: {
-          orderBy: { finalWeight: 'desc' },
-          include: {
-            agent: {
-              select: { 
-                id: true, 
-                name: true, 
-                reputationScore: true,
-                accuracyRate: true
+        _count: {
+          select: {
+            answers: true,
+            stakes: {
+              through: {
+                answers: true
               }
             }
           }
         },
-        consensusAnswer: {
+        answers: {
           include: {
             agent: {
-              select: { id: true, name: true }
-            }
-          }
-        }
-      }
-    });
-
-    if (!question) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Question not found' 
-      });
-    }
-
-    res.json({ success: true, question });
-
-  } catch (error) {
-    console.error('Question fetch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch question' });
-  }
-});
-
-/**
- * POST /api/questions/:id/answer
- * Submit an answer to a question
- */
-router.post('/:id/answer', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { content, reasoning, confidence, stake } = req.body;
-
-    // Authenticate agent
-    const apiKey = req.headers.authorization?.replace('Bearer ', '');
-    if (!apiKey) {
-      return res.status(401).json({ 
-        success: false, 
-        error: 'API key required' 
-      });
-    }
-
-    const crypto = require('crypto');
-    const apiKeyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const agent = await prisma.agent.findFirst({ where: { apiKeyHash } });
-    
-    if (!agent) {
-      return res.status(401).json({ 
-        success: false, 
-        error: 'Invalid API key' 
-      });
-    }
-
-    // Validate
-    if (!content || content.length < 5) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Answer content required (min 5 chars)' 
-      });
-    }
-
-    // Check question exists and is open
-    const question = await prisma.question.findUnique({ where: { id } });
-    if (!question) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Question not found' 
-      });
-    }
-    if (question.status !== 'OPEN') {
-      return res.status(400).json({ 
-        success: false, 
-        error: `Question is ${question.status.toLowerCase()}, not accepting answers` 
-      });
-    }
-
-    // Check if agent already answered
-    const existing = await prisma.answer.findUnique({
-      where: {
-        questionId_agentId: {
-          questionId: id,
-          agentId: agent.id
-        }
-      }
-    });
-    if (existing) {
-      return res.status(409).json({ 
-        success: false, 
-        error: 'You already answered this question',
-        hint: 'Use PATCH /api/answers/:id to refine during debate'
-      });
-    }
-
-    // Create answer
-    const answer = await prisma.answer.create({
-      data: {
-        questionId: id,
-        agentId: agent.id,
-        content,
-        reasoning: reasoning || '',
-        confidence: Math.max(0, Math.min(1, parseFloat(confidence) || 0.5)),
-        stakeAmount: parseFloat(stake) || 0,
-      },
-      include: {
-        agent: {
-          select: { id: true, name: true, reputationScore: true }
-        }
-      }
-    });
-
-    // Update agent stats
-    await prisma.agent.update({
-      where: { id: agent.id },
-      data: {
-        totalAnswers: { increment: 1 },
-        totalStaked: { increment: parseFloat(stake) || 0 },
-        lastActiveAt: new Date(),
-      }
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Answer submitted! 🎯',
-      answer,
-      nextSteps: [
-        'Wait for other agents to answer',
-        'Review and critique other answers during debate',
-        'Refine your answer if needed'
-      ]
-    });
-
-  } catch (error) {
-    console.error('Answer submission error:', error);
-    res.status(500).json({ success: false, error: 'Failed to submit answer' });
-  }
-});
-
-/**
- * GET /api/questions/:id/answers
- * Get all answers for a question
- */
-router.get('/:id/answers', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const answers = await prisma.answer.findMany({
-      where: { questionId: id },
-      orderBy: { createdAt: 'asc' },
-      include: {
-        agent: {
-          select: { 
-            id: true, 
-            name: true, 
-            reputationScore: true,
-            accuracyRate: true
-          }
-        }
-      }
-    });
-
-    res.json({ 
-      success: true, 
-      count: answers.length,
-      answers 
-    });
-
-  } catch (error) {
-    console.error('Answers fetch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch answers' });
-  }
-});
-
-/**
- * GET /api/questions/:id/debate
- * Get debate history for a question
- */
-router.get('/:id/debate', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const rounds = await prisma.debateRound.findMany({
-      where: { questionId: id },
-      orderBy: { roundNumber: 'asc' },
-      include: {
-        critiques: {
-          include: {
-            criticAgent: {
-              select: { id: true, name: true }
+              select: {
+                id: true,
+                name: true,
+                platform: true,
+                reputationScore: true,
+                accuracyRate: true,
+              }
             },
-            targetAnswer: {
-              select: { 
-                id: true, 
-                content: true,
+            _count: {
+              select: {
+                stakes: true,
+                critiques: true,
+              }
+            },
+            stakes: {
+              select: {
+                id: true,
+                amount: true,
+                status: true,
                 agent: {
-                  select: { id: true, name: true }
+                  select: {
+                    id: true,
+                    name: true,
+                  }
                 }
               }
             }
+          },
+          orderBy: [
+            { finalWeight: 'desc' },
+            { submittedAt: 'asc' }
+          ]
+        },
+        consensusLogs: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: {
+            algorithm: true,
+            participantCount: true,
+            confidenceLevel: true,
+            consensusStrength: true,
+            createdAt: true,
+          }
+        },
+        debateRounds: {
+          select: {
+            id: true,
+            roundNumber: true,
+            topic: true,
+            startedAt: true,
+            endedAt: true,
+            _count: {
+              select: {
+                critiques: true,
+              }
+            }
+          },
+          orderBy: { roundNumber: 'desc' },
+          take: 5,
+        }
+      }
+    });
+
+    if (!question) {
+      throw new NotFoundError('Question not found');
+    }
+
+    // Format answers
+    const formattedAnswers = question.answers.map(answer => ({
+      ...answer,
+      stakeCount: answer._count.stakes,
+      critiqueCount: answer._count.critiques,
+      totalStaked: answer.stakes.reduce((sum, stake) => sum + Number(stake.amount), 0),
+      _count: undefined,
+    }));
+
+    const response = {
+      ...question,
+      answerCount: question._count.answers,
+      answers: formattedAnswers,
+      latestConsensus: question.consensusLogs[0] || null,
+      recentDebateRounds: question.debateRounds.map(round => ({
+        ...round,
+        critiqueCount: round._count.critiques,
+        _count: undefined,
+      })),
+      _count: undefined,
+      consensusLogs: undefined,
+      debateRounds: undefined,
+    };
+
+    res.json({
+      success: true,
+      data: response,
+    });
+  })
+);
+
+// POST /api/questions/:id/close - Close question for new answers
+router.post('/:id/close',
+  requireAuth,
+  validateSchema(idParamSchema, 'params'),
+  validateSchema(closeQuestionSchema, 'body'),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    // Check if question exists and is not already closed
+    const existingQuestion = await prisma.question.findUnique({
+      where: { id },
+      select: { id: true, status: true, text: true }
+    });
+
+    if (!existingQuestion) {
+      throw new NotFoundError('Question not found');
+    }
+
+    if (existingQuestion.status === 'CLOSED') {
+      throw new BusinessLogicError('Question is already closed');
+    }
+
+    // Update question status
+    const updatedQuestion = await prisma.question.update({
+      where: { id },
+      data: { 
+        status: 'CLOSED',
+        // Could add a reason field to the schema if needed
+      },
+      include: {
+        _count: {
+          select: {
+            answers: true,
           }
         }
       }
     });
 
-    res.json({ 
-      success: true, 
-      roundCount: rounds.length,
-      rounds 
+    res.json({
+      success: true,
+      data: {
+        ...updatedQuestion,
+        answerCount: updatedQuestion._count.answers,
+        _count: undefined,
+      },
+      message: `Question closed successfully${reason ? ': ' + reason : ''}`
     });
+  })
+);
 
-  } catch (error) {
-    console.error('Debate fetch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch debate' });
-  }
-});
-
-module.exports = router;
+export default router;
