@@ -23,5 +23,8 @@
     "prediction-markets"
   ],
   "author": "SwarmOracle",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "uuid": "^13.0.0"
+  }
 }
