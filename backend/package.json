@@ -4,7 +4,8 @@
   "description": "High-performance collective intelligence backend - optimized for 10,000+ concurrent agents",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/app-optimized.js",
+    "start": "node start.js",
+    "start:direct": "node src/app-optimized.js",
     "start:original": "node src/index.js",
     "dev": "nodemon src/app-optimized.js",
     "db:generate": "npx prisma generate",

@@ -1,69 +1,62 @@
-# SwarmOracle Error Log
+# Errors Log - SwarmOracle Deployment
 
-This file captures command failures, exceptions, and technical issues for the SwarmOracle project.
-
-## Format Reference
-```markdown
-## [ERR-YYYYMMDD-XXX] skill_or_command_name
-
-**Logged**: ISO-8601 timestamp
-**Priority**: high
-**Status**: pending | in_progress | resolved | wont_fix
-**Area**: frontend | backend | infra | tests | docs | config
-
-### Summary
-Brief description of what failed
-
-### Error
-```
-Actual error message or output
-```
-
-### Context
-- Command/operation attempted
-- Input or parameters used
-- Environment details if relevant
-
-### Suggested Fix
-If identifiable, what might resolve this
-
-### Metadata
-- Reproducible: yes | no | unknown
-- Related Files: path/to/file.ext
-- See Also: ERR-YYYYMMDD-XXX (if recurring)
-```
+Format: `ERR-YYYYMMDD-XXX` | Categories: syntax, runtime, config, network
 
 ---
 
-## [ERR-20260201-001] railway_deployment_404
+## [ERR-20260201-001] syntax
 
-**Logged**: 2026-02-01T23:52:00Z
-**Priority**: high
-**Status**: pending
-**Area**: infra
-
-### Summary
-Railway backend returning 404 errors for all endpoints including health check
+**Logged**: 2026-02-01T23:45:00Z
+**Priority**: critical
+**Status**: resolved
+**Area**: websocket
 
 ### Error
-```
-Web fetch failed (404): {"status":"error","code":404,"message":"Application not found","request_id":"1EKfM20CRb-FOsDm0_TJvA"}
-```
+SyntaxError at line 480 in websocket-service.js: `module.exports = SwarmOracleWebSocketService;"`
 
-### Context
-- Operation attempted: GET https://swarmoracle-production.up.railway.app/health
-- Expected: Health check response with service status
-- Environment: Production Railway deployment
+### Root Cause
+Extra quote character at the end of module.exports statement causing Node.js parsing failure.
 
-### Suggested Fix
-1. Check Railway dashboard for deployment status and logs
-2. Verify environment variables are properly configured
-3. Ensure database connection is established
-4. Review startup command in railway.json
+### Resolution
+- **Fixed**: Removed trailing quote in commit 12cec5f
+- **Verification**: Service now exports correctly without syntax errors
+
+### Prevention
+- Add pre-commit hooks for syntax validation
+- Use ESLint with strict parsing rules
 
 ### Metadata
-- Reproducible: yes
-- Related Files: railway.json, backend/src/app-optimized.js
-- See Also: None
+- Source: railway_crash_logs
+- Related Files: backend/src/services/websocket-service.js
+- Tags: syntax-error, websocket, module-exports
+
+---
+
+## [ERR-20260201-002] config
+
+**Logged**: 2026-02-01T23:56:00Z
+**Priority**: medium
+**Status**: in_progress
+**Area**: deployment
+
+### Error
+Railway deployment showing "floteris-backend" instead of SwarmOracle service
+
+### Root Cause
+Previous deployment or service configuration conflict causing wrong service to respond to health checks.
+
+### Investigation
+- Health endpoint returns: `{"status":"healthy","service":"floteris-backend"}`
+- Expected: `{"status":"healthy","service":"swarm-oracle"}`
+- New deployment building: f2b6a1f0-7aee-4c39-a08c-9fdb1bc4fdb1
+
+### Status
+- **Current**: Waiting for new deployment to complete
+- **Expected**: Service name should update once deployment finishes
+
+### Metadata
+- Source: health_check_verification
+- Related Files: backend/src/app-optimized.js (health endpoint)
+- Tags: railway, service-name, deployment
 
 ---
