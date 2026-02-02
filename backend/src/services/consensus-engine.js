@@ -13,7 +13,26 @@ class ConsensusEngine extends EventEmitter {
     constructor() {
         super();
         this.prisma = new PrismaClient();
-        this.queue = new Bull('consensus-queue', { redis: process.env.REDIS_URL });
+        
+        // Redis/Bull queue (optional)
+        if (process.env.REDIS_URL) {
+            this.queue = new Bull('consensus-queue', { redis: process.env.REDIS_URL });
+            this.setupQueue();
+        } else {
+            console.log('⚠️  ConsensusEngine running without Redis queue');
+            // Create mock queue for compatibility
+            this.queue = {
+                add: async (name, data) => {
+                    // Process synchronously without queue
+                    const result = await this.calculateConsensusAsync(data.questionId, data.options);
+                    this.emit('consensus:calculated', result);
+                    return { id: Date.now(), data: result };
+                },
+                getWaiting: async () => [],
+                on: () => {}
+            };
+        }
+        
         this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
         
         // Performance monitoring
@@ -22,8 +41,6 @@ class ConsensusEngine extends EventEmitter {
             totalCalculations: 0,
             lastCalculationTime: null
         };
-        
-        this.setupQueue();
     }
     
     setupQueue() {

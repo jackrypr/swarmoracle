@@ -36,12 +36,26 @@ const prisma = new PrismaClient({
     }
 });
 
-const redis = new Redis(process.env.REDIS_URL, {
-    maxRetriesPerRequest: 3,
-    retryDelayOnFailover: 100,
-    connectTimeout: 10000,
-    commandTimeout: 5000
-});
+// Redis connection (optional - will work without Redis for basic functionality)
+let redis;
+if (process.env.REDIS_URL) {
+    redis = new Redis(process.env.REDIS_URL, {
+        maxRetriesPerRequest: 3,
+        retryDelayOnFailover: 100,
+        connectTimeout: 10000,
+        commandTimeout: 5000
+    });
+    console.log('🔄 Redis configured');
+} else {
+    console.log('⚠️  REDIS_URL not set - running without Redis cache');
+    // Create mock Redis for compatibility
+    redis = {
+        ping: async () => 'PONG',
+        get: async () => null,
+        set: async () => 'OK',
+        disconnect: () => {}
+    };
+}
 
 // Initialize optimized services
 const consensusEngine = new ConsensusEngine();
@@ -235,25 +249,29 @@ consensusEngine.on('consensus:calculated', (result) => {
     // Broadcast via WebSocket
     websocketService.broadcastConsensusReached(result.questionId, result.consensus);
     
-    // Publish to Redis for other services
-    redis.publish('swarm:events', JSON.stringify({
-        type: 'consensus:calculated',
-        questionId: result.questionId,
-        data: result.consensus,
-        timestamp: new Date()
-    }));
+    // Publish to Redis for other services (if Redis is available)
+    if (process.env.REDIS_URL && redis.publish) {
+        redis.publish('swarm:events', JSON.stringify({
+            type: 'consensus:calculated',
+            questionId: result.questionId,
+            data: result.consensus,
+            timestamp: new Date()
+        }));
+    }
 });
 
 consensusEngine.on('consensus:failed', (error) => {
     console.error('Consensus calculation failed:', error);
     
-    // Could broadcast error to relevant subscribers
-    redis.publish('swarm:events', JSON.stringify({
-        type: 'consensus:failed',
-        questionId: error.questionId,
-        error: error.error,
-        timestamp: new Date()
-    }));
+    // Could broadcast error to relevant subscribers (if Redis is available)
+    if (process.env.REDIS_URL && redis.publish) {
+        redis.publish('swarm:events', JSON.stringify({
+            type: 'consensus:failed',
+            questionId: error.questionId,
+            error: error.error,
+            timestamp: new Date()
+        }));
+    }
 });
 
 // Global error handling
